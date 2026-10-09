@@ -1,0 +1,37 @@
+# Non-secret runtime settings. Secrets live in .env.
+
+llm:
+  # Both are stable and free-tier eligible (ai.google.dev, 2026-10-08). Free-tier quotas
+  # are per model, so the fallback has its own budget. gemini-3.8-flash allows only
+  # 20 requests/day on the free tier, so it is the fallback, not the primary.
+  model: gemini-3.5-flash-lite
+  fallback_model: gemini-3.8-flash
+  timeout_s: 30  # per request; a hung call fails instead of blocking the chat
+
+bigquery:
+  dataset: bigquery-public-data.thelook_ecommerce
+  tables: [orders, order_items, products, users]
+  # Personal data in the users table: never readable, never shown to the model.
+  pii_columns: [first_name, last_name, email, street_address, postal_code, latitude, longitude, user_geom]
+  max_bytes_billed: 1000000000  # 1 GB per query; the four tables are far smaller
+  timeout_s: 30
+
+agent:
+  max_steps: 3  # sub-queries per question
+  max_attempts: 3  # SQL attempts per sub-query, including self-corrections
+  max_rows: 50  # rows per result passed to the model
+  turn_budget_s: 60  # wall-clock limit per turn; then the user gets "service busy"
+
+storage:
+  # Conversation checkpoints, saved reports and the audit log.
+  sqlite_path: data/agent.db
+  # One JSON line per node span and per turn; /stats in the CLI summarizes it.
+  log_path: logs/agent.jsonl
+
+# Assumption: the dataset has no user-to-product relationship, so each user
+# is granted a set of product categories. The SQL guard enforces it.
+users:
+  alice:
+    categories: [Jeans, Pants, Shorts]
+  bob:
+    categories: [Outerwear & Coats, Sweaters]

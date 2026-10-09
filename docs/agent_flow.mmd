@@ -1,0 +1,60 @@
+%% Agent graph: what happens inside one chat turn (this is what the prototype implements in LangGraph)
+flowchart TD
+
+    START(["User message<br/>user_id, thread_id owned by that user, product scope"]) --> CLASSIFY{"Classify: one LLM call<br/>input guard: analysis question? injection attempt?<br/>router: intent"}
+
+    CLASSIFY -->|"out of scope or malicious"| REFUSE["Polite refusal<br/>security event logged<br/>not added to history"]
+    CLASSIFY -->|"what data do we have?"| SCHEMA["Answer from cached schema metadata"]
+    CLASSIFY -->|"follow-up discussion"| ANSWER
+    CLASSIFY -->|"analysis or report"| CONTEXT["Build context<br/>schema + persona<br/>design only: similar golden trios + user prefs"]
+    CLASSIFY -->|"manage saved reports"| REPTOOL{"Reports tool"}
+
+    CONTEXT --> PLAN["Plan<br/>split multi-step question into sub-queries"]
+    PLAN --> GEN["Generate SQL"]
+    GEN --> VALID{"Validate SQL, deterministic<br/>single SELECT, table allowlist,<br/>PII columns blocked, no * on users,<br/>product scope injected as CTEs,<br/>dry-run under bytes limit"}
+
+    VALID -->|"rejected"| BUDGET{"Attempts left?<br/>max 3 per sub-query"}
+    VALID -->|"ok"| EXEC["Execute on BigQuery<br/>timeout, max bytes billed, row cap"]
+
+    EXEC -->|"SQL error"| BUDGET
+    EXEC -->|"empty result, first time"| BUDGET
+    BUDGET -->|"yes: feed error back to model"| GEN
+    BUDGET -->|"no"| FAIL["Graceful failure<br/>say what was tried, suggest rephrasing"]
+
+    EXEC -->|"rows"| MORE{"More sub-queries?"}
+    MORE -->|"yes"| GEN
+    MORE -->|"no"| ANSWER["Analyze results<br/>answer, or report with insights + action items"]
+
+    REPTOOL -->|"list"| DO["List own reports"]
+    RESOLVE -->|"no match"| MASK
+    REPTOOL -->|"delete"| RESOLVE["Resolve targets<br/>only reports owned by this user<br/>keyword or this conversation"]
+    RESOLVE --> CONFIRM{{"PAUSE: interrupt<br/>show exact list of N reports<br/>ask for explicit yes"}}
+    CONFIRM -->|"yes"| DELETE["Delete + audit log entry<br/>in one transaction"]
+    CONFIRM -->|"anything else"| CANCEL["Cancelled, nothing deleted"]
+
+    ANSWER --> MASK["Output guard<br/>mask emails, phones, names, addresses"]
+    SCHEMA --> MASK
+    FAIL --> MASK
+    DO --> MASK
+    DELETE --> MASK
+    CANCEL --> MASK
+    REFUSE --> DONE
+    MASK -->|"report"| SAVE["Auto-save report<br/>reply names its title"]
+    SAVE --> DONE
+    MASK --> DONE(["Reply to user"])
+
+    DOWN["Gemini or BigQuery still failing after<br/>backoff + fallback model: the turn ends<br/>with a clear message, history untouched"]
+    DOWN -.- DONE
+
+    TRACE["Every node emits a span: trace_id, latency,<br/>LLM calls + tokens, SQL, attempt, status<br/>one turn record: intent, outcome, retries<br/>JSONL, PII-masked; /stats in the CLI"]
+    DONE -.- TRACE
+
+    classDef safety fill:#fde2e2,stroke:#b42318,color:#4a0d08
+    classDef resilience fill:#fff3d6,stroke:#b7791f,color:#4a3000
+    classDef hitl fill:#e3e8ff,stroke:#3b4cca,color:#141a4d
+    classDef obs fill:#d9f2e0,stroke:#1f8a3b,color:#0b3d1a
+
+    class CLASSIFY,VALID,MASK,REFUSE safety
+    class BUDGET,FAIL,EXEC,DOWN resilience
+    class RESOLVE,CONFIRM,DELETE,CANCEL,SAVE hitl
+    class TRACE obs

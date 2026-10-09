@@ -1,0 +1,100 @@
+%% High-Level Design: Data Analysis Chat Assistant (production target on GCP)
+%% Green = implemented in the prototype, Grey = production design only (described in the HLD).
+%% Dotted "prototype" edges point from a production store to the stand-in the prototype uses.
+flowchart TB
+
+    subgraph CLIENTS["Clients"]
+        CLI["CLI chat<br/>prototype interface"]
+        WEB["Web / Slack chat"]
+    end
+
+    API["Chat API: Cloud Run, FastAPI<br/>OIDC auth, user identity + product scope<br/>rate limiting, streaming"]
+
+    subgraph AGENT["Agent service: Cloud Run + LangGraph"]
+        direction TB
+        ORCH["Orchestrator, StateGraph<br/>router, planner, retry budget"]
+        GIN["Input guardrails<br/>scope check, prompt-injection check<br/>same LLM call as the router<br/>production: + Model Armor screening"]
+        CTX["Context builder<br/>schema + persona<br/>design only: golden trios + user prefs"]
+        SQLP["SQL pipeline<br/>generate → validate → dry-run → execute → self-correct"]
+        REP["Analyst and report writer<br/>insights + action items"]
+        GOUT["Output guardrails<br/>PII masking: patterns<br/>production: + Cloud DLP"]
+        TOOLS["Tool registry, extensible<br/>saved reports<br/>design only: charts, email, web search<br/>as MCP servers"]
+        HITL["Confirmation gate<br/>interrupt before destructive ops"]
+        ORCH --> GIN --> CTX --> SQLP --> REP --> GOUT
+        ORCH --> TOOLS --> HITL
+    end
+
+    subgraph LLMS["LLM layer: Gemini API / Vertex AI"]
+        direction TB
+        GW["LLM gateway<br/>timeouts, backoff on 429/5xx,<br/>fallback model<br/>design only: circuit breaker"]
+        FLASH["Gemini Flash-Lite + Flash<br/>routing, SQL, guardrails, reports<br/>prototype: 3.5 Flash-Lite primary,<br/>3.8 Flash fallback"]
+        PRO["Gemini Pro<br/>long reports, paid tier"]
+        EMB["Embedding model"]
+        GW --> FLASH
+        GW --> PRO
+    end
+
+    subgraph DATA["Data stores"]
+        direction TB
+        BQ[("BigQuery: thelook_ecommerce<br/>read-only service account, max bytes billed<br/>production: authorized views without PII,<br/>row-level product scope<br/>prototype: scope CTEs from the SQL guard")]
+        PG[("Cloud SQL Postgres + pgvector<br/>conversation checkpoints<br/>user preferences and memory<br/>saved reports, audit log<br/>golden trio embeddings")]
+        SQLITE[("SQLite: data/agent.db<br/>checkpoints, saved reports,<br/>audit log")]
+        PROMPTS[("Prompt registry: Langfuse<br/>versioned persona and instructions<br/>prod label, TTL cache")]
+        YAML[("prompts.yaml<br/>read on every model call")]
+        GCS[("GCS: Golden Bucket<br/>Question → SQL → Report trios<br/>versioned, source of truth")]
+    end
+
+    subgraph OBS["Observability"]
+        direction TB
+        MON["Cloud Logging + Monitoring<br/>structured JSON logs, metrics, alerts"]
+        JSONL["logs/agent.jsonl + /stats<br/>spans, turn records,<br/>security events"]
+        LF["Langfuse traces<br/>one trace per turn: prompts, SQL,<br/>tool calls, tokens, cost, retries"]
+    end
+
+    subgraph LOOP["Learning loop and QA: offline Cloud Run Jobs + CI"]
+        direction TB
+        FB["Feedback collector<br/>thumbs, edits, rephrasings"]
+        MEM["Memory extractor job<br/>updates user preferences"]
+        CUR["Golden curation pipeline<br/>good traces → candidate trios → review → embed"]
+        EVAL["Eval harness in CI<br/>golden test set, SQL result match,<br/>LLM-as-judge, safety red-team suite"]
+        FB --> MEM
+        FB --> CUR
+    end
+
+    subgraph OPS["Non-developer operators"]
+        ADMIN["CEO: prompt admin UI<br/>edits tone, no redeploy"]
+        ANALYST["Analyst: review UI<br/>approves new golden trios"]
+    end
+
+    CLIENTS --> API
+    API <-->|"message in, masked reply out"| ORCH
+
+    AGENT -->|"all LLM calls"| GW
+    CTX --> EMB
+
+    SQLP -->|"validated, scoped SQL"| BQ
+    CTX -->|"trios, prefs, persona"| PG
+    CTX --> PROMPTS
+    ORCH -->|"checkpoint every step"| PG
+    HITL -->|"delete only after explicit yes"| PG
+
+    AGENT -.->|"spans, logs, metrics"| OBS
+    LF -.->|"traces + user feedback"| FB
+    MEM --> PG
+    CUR --> GCS
+    GCS -->|"embed + index"| PG
+    GCS -.->|"regression set"| EVAL
+    EVAL -.->|"release gate"| AGENT
+
+    ADMIN --> PROMPTS
+    ANALYST --> CUR
+
+    PG -.->|"prototype"| SQLITE
+    PROMPTS -.->|"prototype"| YAML
+    MON -.->|"prototype"| JSONL
+
+    classDef proto fill:#d9f2e0,stroke:#1f8a3b,color:#0b3d1a,stroke-width:2px
+    classDef design fill:#eceff4,stroke:#7a8699,color:#1c2430
+
+    class CLI,ORCH,GIN,CTX,SQLP,REP,GOUT,TOOLS,HITL,GW,FLASH,BQ,SQLITE,YAML,JSONL proto
+    class WEB,ADMIN,ANALYST,API,PRO,EMB,GCS,PG,PROMPTS,LF,MON,FB,MEM,CUR,EVAL design
